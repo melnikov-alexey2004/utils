@@ -1,0 +1,6 @@
+/all_datasets/
+Drain_bechmark_result*.csv
+.idea/
+__pycache__/
+.mypy_cache
+.pytest_cache
