@@ -9,16 +9,19 @@ from typing import Optional, Mapping, MutableMapping, NamedTuple, Sequence, Tupl
 
 import jsonpickle  # type: ignore[import]
 from cachetools import LRUCache, cachedmethod
+from pyparsing import warnings
 
 from drain3.drain import Drain, DrainBase, LogCluster
 from drain3.masking import LogMasker
 from drain3.persistence_handler import PersistenceHandler
 from drain3.simple_profiler import SimpleProfiler, NullProfiler, Profiler
 from drain3.template_miner_config import TemplateMinerConfig
+from drain3.file_persistence import FilePersistence
 from typing import TypedDict, Literal
 import pandas as pd
 import math
 import tqdm.auto as tqdm
+import warnings
 
 
 logger = logging.getLogger(__name__)
@@ -77,6 +80,10 @@ class TemplateMiner:
         self.last_save_time = time.time()
 
         if persistence_handler is not None:
+            if isinstance(persistence_handler, FilePersistence):
+                warnings.warn('load state from ' + persistence_handler.file_path)
+            else:
+                warnings.warn('load state')
             self.load_state()
 
         self.seen_log_count = 0

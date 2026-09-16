@@ -77,7 +77,7 @@ for dataset, setting in benchmark_settings.items():
 
     )
 
-    parser_drain3 = TemplateMiner(file_persistence, config)
+    parser_drain3 = TemplateMiner(persistence_handler=file_persistence, config=config)
 
     parser = LogParser(log_format=setting['log_format'],
                        depth=DEPTH,
