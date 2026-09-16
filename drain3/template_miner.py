@@ -31,8 +31,8 @@ ExtractedParameter = NamedTuple("ExtractedParameter", [("value", str), ("mask_na
 class TemplateMiner:
 
     def __init__(self,
+                 config: TemplateMinerConfig,
                  persistence_handler: Optional[PersistenceHandler] = None,
-                 config: Optional[TemplateMinerConfig] = None,
                  ):
         """
         Wrapper for Drain with persistence and masking support
@@ -40,11 +40,8 @@ class TemplateMiner:
         :param config: Configuration object. When none, configuration is loaded from default .ini file (if exist)
         """
         logger.info("Starting Drain3 template miner")
+        assert config is not None and isinstance(config, TemplateMinerConfig)
 
-        if config is None:
-            logger.info(f"Loading configuration from {config_filename}")
-            config = TemplateMinerConfig()
-            config.load(config_filename)
 
         self.config = config
 
@@ -84,6 +81,10 @@ class TemplateMiner:
 
         self.seen_log_count = 0
         self.log_templ_updated: bool = False
+        self.cnt_index = 0
+        if self.config.use_fast_content_definition:
+            self.cnt_index = self.config.headers.index(self.config.content)
+
 
     def load_state(self) -> None:
         logger.info("Checking for saved state")
@@ -143,20 +144,20 @@ class TemplateMiner:
         if f is not None and callable(f):
             return f(line, is_raw_log=is_raw_log)
 
-        line = line.lower().rstrip()
+        line = line.lower()
         if is_raw_log:
 
             if self.config.use_fast_content_definition:
                 splited = line.split()
                 if len(splited) >= len(self.config.headers):
-                    splited = splited[self.config.headers.index(self.config.content):]
+                    splited = splited[self.cnt_index:]
                     line = " ".join(splited)
                 else:
                     line = ""
 
             else:
 
-                m = self.config.regex.match(line)
+                m = self.config.regex.match(line.strip())
                 if not m:
                     return ""
 
@@ -399,11 +400,12 @@ class TemplateMiner:
         if f is not None and callable(f):
             return f(raw_log)
 
-        raw_log = raw_log.strip()
+
         # if do_lower:
         #     raw_log = raw_log.lower()
         # log format больше не приводится к нижнему   регистру
         if not self.config.use_fast_content_definition:
+            raw_log = raw_log.strip()
             m = self.config.regex.match(raw_log)
             if not m or not raw_log:
                 return []
@@ -411,8 +413,7 @@ class TemplateMiner:
 
         m = raw_log.split()
         if len(m) >= len(self.config.headers):
-            cnt_ind = self.config.headers.index(self.config.content)
-            return m[:cnt_ind] + [" ".join(m[cnt_ind:])]
+            return m[:self.cnt_index] + [" ".join(m[self.cnt_index:])]
 
         return []
 

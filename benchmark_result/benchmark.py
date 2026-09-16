@@ -51,7 +51,7 @@ for dataset, setting in benchmark_settings.items():
     re_dict.update({f"restr{i}":re.compile(restr) for i, restr in enumerate(setting['regex'])})
 
 
-    shared_rex = list(re_dict.values())
+    # shared_rex = list(re_dict.values())
     shared_split_els = ['(', ')', '[', ']', '.', '_', ',', '/', '-', '=', ':']
     # shared_split_els = []
     #############################################################################################
@@ -68,11 +68,12 @@ for dataset, setting in benchmark_settings.items():
         drain_max_clusters=100_000,
         masking_instructions=masking_instr,
         parameter_extraction_cache_capacity=100_000,
-        is_log_format_escaped=not USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT,
+        is_log_format_have_not_escaped_chars=USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT, # False on benchmark
         snapshot_interval_minutes=30,
         profiling_report_sec=5*60,
         snapshot_compress_state=False,
         use_fast_content_definition=True,
+        trigger_save_after_seen_log_count=10_000,
 
     )
 
@@ -85,7 +86,7 @@ for dataset, setting in benchmark_settings.items():
                        rex=list(re_dict.values()),
                        split_by_el=shared_split_els,
                        content='Content',
-                       is_log_format_escaped=not USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT,
+                       is_log_format_escaped=USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT,
                        log_cluster_size=100)
 
     if not  MY_DRAIN: parser = parser_drain3
@@ -108,7 +109,7 @@ for dataset, setting in benchmark_settings.items():
 
     if not MY_DRAIN:
         print("Prefix Tree:")
-        parser.drain.print_tree()
+        # parser.drain.print_tree()
 
         parser.profiler.report(0)
 
