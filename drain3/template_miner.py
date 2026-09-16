@@ -128,6 +128,10 @@ class TemplateMiner:
     def save_state(self, snapshot_reason: str) -> None:
         assert self.persistence_handler is not None
 
+        self.last_save_time = time.time()
+        self.seen_log_count = 0
+        self.log_templ_updated = False
+
         state = jsonpickle.dumps(self.drain, keys=True).encode('utf-8')
         if self.config.snapshot_compress_state:
             state = base64.b64encode(zlib.compress(state))
@@ -211,9 +215,7 @@ class TemplateMiner:
                 if diff_time_sec >= self.config.snapshot_interval_minutes * 60:
 
                     self.save_state(f"after {self.seen_log_count} matched log, timestamp = {time.time()}")
-                    self.last_save_time = time.time()
-                    self.seen_log_count = 0
-                    self.log_templ_updated = False
+
 
             self.profiler.end_section()
 
