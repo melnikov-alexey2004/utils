@@ -146,15 +146,28 @@ class TemplateMiner:
         log_content_length: int
 
     def get_log_content_from_raw(self, line: str, is_raw_log: bool=True) -> str:
+        f = self.config.use_custom_content_extractor
+        if f is not None and callable(f):
+            return f(line, is_raw_log=is_raw_log)
 
         line = line.lower().rstrip()
         if is_raw_log:
 
-            m = self.config.regex.match(line)
-            if not m:
-                return ""
+            if self.config.use_fast_content_definition:
+                splited = line.split()
+                if len(splited) >= len(self.config.headers):
+                    splited = splited[self.config.headers.index(self.config.content):]
+                    line = " ".join(splited)
+                else:
+                    line = ""
 
-            line = m[self.config.content]
+            else:
+
+                m = self.config.regex.match(line)
+                if not m:
+                    return ""
+
+                line = m[self.config.content]
 
         return line.strip()
 
@@ -378,14 +391,26 @@ class TemplateMiner:
         return template_regex, param_group_name_to_mask_name
 
     def split_raw_log_into_columns(self, raw_log) -> list[str]:
+        f = self.config.use_custom_raw_log_spliter
+        if f is not None and callable(f):
+            return f(raw_log)
+
         raw_log = raw_log.strip()
         # if do_lower:
         #     raw_log = raw_log.lower()
         # log format больше не приводится к нижнему   регистру
-        m = self.config.regex.match(raw_log)
-        if not m or not raw_log:
-            return []
-        return [m[h] for h in self.config.headers if h != self.config.content] + [m[self.config.content]]
+        if not self.config.use_fast_content_definition:
+            m = self.config.regex.match(raw_log)
+            if not m or not raw_log:
+                return []
+            return [m[h] for h in self.config.headers if h != self.config.content] + [m[self.config.content]]
+
+        m = raw_log.split()
+        if len(m) >= len(self.config.headers):
+            cnt_ind = self.config.headers.index(self.config.content)
+            return m[:cnt_ind] + [" ".join(m[cnt_ind:])]
+
+        return []
 
     def generate_dataframe(self, filepath: str, readline_num:Optional[float]=None) -> pd.DataFrame:
 

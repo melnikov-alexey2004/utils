@@ -4,10 +4,9 @@ import ast
 import configparser
 import json
 import logging
-from typing import Collection, Optional
+from typing import Collection, Optional, Callable, Protocol
 from dataclasses import dataclass, field
 from drain3.masking import AbstractMaskingInstruction, MaskingInstruction
-import typing
 from my_drain import LogParser
 import warnings
 import regex as re
@@ -16,8 +15,16 @@ import regex as re
 logger = logging.getLogger(__name__)
 
 
+class ExtractContentFuncT(Protocol):
+    def __call__(self, line: str, is_raw_log: bool=True) -> str:
+        pass
+
+
 class TemplateMinerConfig:
     log_format: str = "" # section_logformat
+    use_fast_content_definition: bool = True # section_logformat
+    use_custom_content_extractor: ExtractContentFuncT = None
+    use_custom_raw_log_spliter: Callable[[str,], list[str]] = None
     engine: str = "Drain"
     profiling_enabled: bool = False
     profiling_report_sec: int = 60
@@ -39,6 +46,9 @@ class TemplateMinerConfig:
 
     def __init__(self, log_format: str="", drain_extra_delimiters: Collection[str]=None,
                  masking_instructions: Collection[AbstractMaskingInstruction]=None,
+                 use_fast_content_definition: bool = True,
+                 use_custom_content_extractor: ExtractContentFuncT = None,
+                 use_custom_raw_log_spliter: Callable[[str, ], list[str]] = None,
                  engine: str = "Drain", profiling_enabled = False, profiling_report_sec = 60,
                  snapshot_interval_minutes = 5, snapshot_compress_state = True,
                  drain_sim_th = 0.4, drain_depth = 4, drain_max_children = 100,
@@ -48,6 +58,7 @@ class TemplateMinerConfig:
                  is_log_format_escaped = False, is_split_seqs_escaped: bool = False
                  ):
         self.log_format = log_format
+        self.use_fast_content_definition = use_fast_content_definition
         self.engine = engine
         self.profiling_enabled = profiling_enabled
         self.profiling_report_sec = profiling_report_sec
@@ -79,12 +90,17 @@ class TemplateMinerConfig:
         self.content = content
         self.is_log_format_escaped = is_log_format_escaped
         self.is_split_seqs_escaped = is_split_seqs_escaped
-
-        assert f'<{content}>' in self.log_format, 'change content parameter'
+        self.use_custom_content_extractor = use_custom_content_extractor
+        self.use_custom_raw_log_spliter = use_custom_raw_log_spliter
+        assert not self.log_format or f'<{content}>' in self.log_format, 'change content parameter'
+        if not self.log_format:
+            warnings.warn('empty log format')
         if self.log_format != "":
             headers, regex = LogParser.generate_logformat_regex(self.log_format, self.is_log_format_escaped)
             self.headers = headers
             self.regex = regex
+        if self.use_fast_content_definition:
+            assert self.headers.index(self.content) == len(self.headers) - 1
 
     def load(self, config_filename: str) -> None:
         parser = configparser.ConfigParser()
@@ -99,9 +115,17 @@ class TemplateMinerConfig:
         section_logformat = 'LOGFORMAT'
 
         self.log_format = parser.get(section_logformat, 'logformat', fallback=self.log_format)
+        self.use_fast_content_definition = parser.getboolean(section_logformat, 'use_fast_content_definition',
+                                            fallback=self.use_fast_content_definition)
         self.content = parser.get(section_logformat, 'content', fallback=self.content)
         self.is_log_format_escaped = parser.getboolean(section_logformat, 'is_log_format_escaped',
                                                        fallback=self.is_log_format_escaped)
+        if self.use_custom_raw_log_spliter is None:
+            warnings.warn('load dont set up use_custom_raw_log_spliter because globals() store variables'
+                          'from current file only and dont have access to namespace from ypur file')
+        if self.use_custom_content_extractor is None:
+            warnings.warn('you can use .use_custom_content_extractor = some_func() now or  re-instanciate this'
+                          'and pass to constructor use_custom_raw_log_spliter and/or use_custom_content_extractor')
 
         self.engine = parser.get(section_drain, 'engine', fallback=self.engine)
 
@@ -150,3 +174,6 @@ class TemplateMinerConfig:
         headers, regex = LogParser.generate_logformat_regex(self.log_format, self.is_log_format_escaped)
         self.headers = headers
         self.regex = regex
+
+        if self.use_fast_content_definition:
+            assert self.headers.index(self.content) == len(self.headers) - 1
