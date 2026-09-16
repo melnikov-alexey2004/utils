@@ -176,7 +176,7 @@ benchmark_settings_without_escaping_in_log_format: dict[str, DrainParams] = {
     },
     "Thunderbird": {
         "log_file": "Thunderbird/Thunderbird_2k.log",
-        "log_format": r"<Label> <Timestamp> <Date> <User> <Month> <Day> <Time> <Location> <Component>[<PID>]: <Content>",
+        "log_format": r"<Label> <Timestamp> <Date> <User> <Month> <Day> <Time> <Location> <Component>: <Content>",
         "regex": [r"(\d+\.){3}\d+"],
         "st": 0.5,
         "depth": 4,
@@ -190,7 +190,7 @@ benchmark_settings_without_escaping_in_log_format: dict[str, DrainParams] = {
     },
     "Linux": {
         "log_file": "Linux/Linux_2k.log",
-        "log_format": r"<Month> <Date> <Time> <Level> <Component>([<PID>])?: <Content>",
+        "log_format": r"<Month> <Date> <Time> <Level> <Component>: <Content>",
         "regex": [r"(\d+\.){3}\d+", r"\d{2}:\d{2}:\d{2}"],
         "st": 0.39,
         "depth": 6,
@@ -222,7 +222,7 @@ benchmark_settings_without_escaping_in_log_format: dict[str, DrainParams] = {
     },
     "Proxifier": {
         "log_file": "Proxifier/Proxifier_2k.log",
-        "log_format": r"[<Time>] <Program> - <Content>",
+        "log_format": r"<Time> <Program> - <Content>",
         "regex": [
             r"<\d+\ssec",
             r"([\w-]+\.)+[\w-]+(:\d+)?",
@@ -234,21 +234,21 @@ benchmark_settings_without_escaping_in_log_format: dict[str, DrainParams] = {
     },
     "OpenSSH": {
         "log_file": "OpenSSH/OpenSSH_2k.log",
-        "log_format": r"<Date> <Day> <Time> <Component> sshd[<Pid>]: <Content>",
+        "log_format": r"<Date> <Day> <Time> <Component> sshd: <Content>",
         "regex": [r"(\d+\.){3}\d+", r"([\w-]+\.){2,}[\w-]+"],
         "st": 0.6,
         "depth": 5,
     },
     "OpenStack": {
         "log_file": "OpenStack/OpenStack_2k.log",
-        "log_format": r"<Logrecord> <Date> <Time> <Pid> <Level> <Component> [<ADDR>] <Content>",
+        "log_format": r"<Logrecord> <Date> <Time> <Pid> <Level> <Component> <ADDR> <Content>",
         "regex": [r"((\d+\.){3}\d+,?)+", r"/.+?\s", r"\d+"],
         "st": 0.5,
         "depth": 5,
     },
     "Mac": {
         "log_file": "Mac/Mac_2k.log",
-        "log_format": r"<Month>  <Date> <Time> <User> <Component>[<PID>]( (<Address>)): <Content>",
+        "log_format": r"<Month>  <Date> <Time> <User> <Component> <Address>: <Content>",
         "regex": [r"([\w-]+\.){2,}[\w-]+"],
         "st": 0.7,
         "depth": 6,

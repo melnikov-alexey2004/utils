@@ -23,6 +23,7 @@ class ExtractContentFuncT(Protocol):
 class TemplateMinerConfig:
     log_format: str = "" # section_logformat
     use_fast_content_definition: bool = True # section_logformat
+    trigger_save_after_seen_log_count: int = 10_000
     use_custom_content_extractor: ExtractContentFuncT = None
     use_custom_raw_log_spliter: Callable[[str,], list[str]] = None
     engine: str = "Drain"
@@ -47,6 +48,7 @@ class TemplateMinerConfig:
     def __init__(self, log_format: str="", drain_extra_delimiters: Collection[str]=None,
                  masking_instructions: Collection[AbstractMaskingInstruction]=None,
                  use_fast_content_definition: bool = True,
+                 trigger_save_after_seen_log_count: int = 10_000,
                  use_custom_content_extractor: ExtractContentFuncT = None,
                  use_custom_raw_log_spliter: Callable[[str, ], list[str]] = None,
                  engine: str = "Drain", profiling_enabled = False, profiling_report_sec = 60,
@@ -59,6 +61,7 @@ class TemplateMinerConfig:
                  ):
         self.log_format = log_format
         self.use_fast_content_definition = use_fast_content_definition
+        self.trigger_save_after_seen_log_count = trigger_save_after_seen_log_count
         self.engine = engine
         self.profiling_enabled = profiling_enabled
         self.profiling_report_sec = profiling_report_sec
@@ -103,6 +106,7 @@ class TemplateMinerConfig:
             assert self.headers.index(self.content) == len(self.headers) - 1
 
     def load(self, config_filename: str) -> None:
+
         parser = configparser.ConfigParser()
         read_files = parser.read(config_filename)
         if len(read_files) == 0:
@@ -120,6 +124,9 @@ class TemplateMinerConfig:
         self.content = parser.get(section_logformat, 'content', fallback=self.content)
         self.is_log_format_escaped = parser.getboolean(section_logformat, 'is_log_format_escaped',
                                                        fallback=self.is_log_format_escaped)
+        self.trigger_save_after_seen_log_count = parser.getint(section_logformat,
+                                                               'trigger_save_after_seen_log_count',
+                                                               fallback=self.__class__.trigger_save_after_seen_log_count)
         if self.use_custom_raw_log_spliter is None:
             warnings.warn('load dont set up use_custom_raw_log_spliter because globals() store variables'
                           'from current file only and dont have access to namespace from ypur file')

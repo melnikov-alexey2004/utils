@@ -14,7 +14,7 @@ from drain3.file_persistence import FilePersistence
 
 benchmark_result = []
 
-USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT = True
+USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT = False
 MY_DRAIN = False
 DATA_DIR = 'my-drain' if MY_DRAIN else 'Drain3'
 DEPTH=5
@@ -71,7 +71,8 @@ for dataset, setting in benchmark_settings.items():
         is_log_format_escaped=not USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT,
         snapshot_interval_minutes=30,
         profiling_report_sec=5*60,
-        snapshot_compress_state=False
+        snapshot_compress_state=False,
+        use_fast_content_definition=True,
 
     )
 

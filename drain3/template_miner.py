@@ -82,6 +82,9 @@ class TemplateMiner:
         if persistence_handler is not None:
             self.load_state()
 
+        self.seen_log_count = 0
+        self.log_templ_updated: bool = False
+
     def load_state(self) -> None:
         logger.info("Checking for saved state")
 
@@ -125,16 +128,6 @@ class TemplateMiner:
                     f"with {self.drain.get_total_cluster_size()} messages, {len(state)} bytes, "
                     f"reason: {snapshot_reason}")
         self.persistence_handler.save_state(state)
-
-    def get_snapshot_reason(self, change_type: str, cluster_id: int) -> Optional[str]:
-        if change_type != "none":
-            return f"{change_type} ({cluster_id})"
-
-        diff_time_sec = time.time() - self.last_save_time
-        if diff_time_sec >= self.config.snapshot_interval_minutes * 60:
-            return "periodic"
-
-        return None
 
     class Parsed(TypedDict):
         change_type: Literal["cluster_created", "none", "cluster_template_changed", "not_matched"]
@@ -196,13 +189,24 @@ class TemplateMiner:
             "not_matched": False if masked_content else True,
             "log_content_length": log_content_length,
         }
+        if result["change_type"] not in ["none", "not_matched"]:
+            self.log_templ_updated = True
+
+        self.seen_log_count += (1 if masked_content else 0)
 
         if self.persistence_handler is not None:
             self.profiler.start_section("save_state")
-            snapshot_reason = self.get_snapshot_reason(change_type, cluster.cluster_id)
-            if snapshot_reason:
-                self.save_state(snapshot_reason)
-                self.last_save_time = time.time()
+
+            if self.log_templ_updated and self.seen_log_count >= self.config.trigger_save_after_seen_log_count:
+
+                diff_time_sec = time.time() - self.last_save_time
+                if diff_time_sec >= self.config.snapshot_interval_minutes * 60:
+
+                    self.save_state(f"after {self.seen_log_count} matched log, timestamp = {time.time()}")
+                    self.last_save_time = time.time()
+                    self.seen_log_count = 0
+                    self.log_templ_updated = False
+
             self.profiler.end_section()
 
         self.profiler.end_section("total")

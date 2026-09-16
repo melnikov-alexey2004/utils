@@ -4,7 +4,6 @@ Drain_bechmark_result*.csv
 __pycache__/
 .mypy_cache
 .pytest_cache
-#/benchmark_result/
 /benchmark_result/Drain3/
 /benchmark_result/my-drain/
 /nb/
