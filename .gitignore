@@ -4,3 +4,7 @@ Drain_bechmark_result*.csv
 __pycache__/
 .mypy_cache
 .pytest_cache
+/benchmark_result/
+/nb/
+/Drain3/
+/req.txt

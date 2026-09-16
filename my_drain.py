@@ -67,7 +67,7 @@ class LogParser:
 
         assert f'<{content}>' in self.log_format, 'change content parameter'
         assert isinstance(self.rex, (tuple, list))
-        headers, regex = self.generate_logformat_regex(self.log_format)
+        headers, regex = self.generate_logformat_regex(self.log_format, self.is_log_format_escaped)
         self.headers=headers
         self.regex=regex
         if isinstance(split_by_el, str): raise TypeError('collection of str')
@@ -238,7 +238,7 @@ class LogParser:
 
     def printTree(self, node=None, dep=0):
         raise NotImplementedError
-
+    
     @dataclasses.dataclass()
     class Parsed:
         ind: Optional[int] = None
@@ -367,14 +367,15 @@ class LogParser:
 
         return pd.DataFrame(df, columns=columns)
 
-    def generate_logformat_regex(self, logformat):
+    @staticmethod
+    def generate_logformat_regex(logformat, is_log_format_escaped):
         """Function to generate regular expression to split log messages"""
         headers = []
         splitters = re.split(r"(<[^<>]+>)", logformat)
         regex = ""
         for k in range(len(splitters)):
             if k % 2 == 0:
-                if not self.is_log_format_escaped:
+                if not is_log_format_escaped:
                     splitter = re.escape(splitters[k])
                     splitter = re.sub(r"(:?\\ +)+", r"\\s+", splitter)
                 else:
