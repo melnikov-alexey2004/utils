@@ -143,6 +143,7 @@ class TemplateMiner:
         template_mined: str
         cluster_count: int
         not_matched: bool
+        log_content_length: int
 
     def get_log_content_from_raw(self, line: str, is_raw_log: bool=True) -> str:
 
@@ -162,6 +163,7 @@ class TemplateMiner:
 
         self.profiler.start_section("get-log-content")
         log_message = self.get_log_content_from_raw(raw_log, is_raw_log)
+        log_content_length = len(log_message)
         self.profiler.end_section()
 
         self.profiler.start_section("mask")
@@ -178,7 +180,8 @@ class TemplateMiner:
             "cluster_size": cluster.size,
             "template_mined": cluster.get_template(),
             "cluster_count": len(self.drain.clusters),
-            "not_matched": False if masked_content else True
+            "not_matched": False if masked_content else True,
+            "log_content_length": log_content_length,
         }
 
         if self.persistence_handler is not None:

@@ -14,7 +14,7 @@ from drain3.file_persistence import FilePersistence
 
 benchmark_result = []
 
-USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT = False
+USE_BENCH_WITHOUT_ESCAPING_IN_LOG_FORMAT = True
 MY_DRAIN = False
 DATA_DIR = 'my-drain' if MY_DRAIN else 'Drain3'
 DEPTH=5

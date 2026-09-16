@@ -176,7 +176,7 @@ benchmark_settings_without_escaping_in_log_format: dict[str, DrainParams] = {
     },
     "Thunderbird": {
         "log_file": "Thunderbird/Thunderbird_2k.log",
-        "log_format": r"<Label> <Timestamp> <Date> <User> <Month> <Day> <Time> <Location> <Component>([<PID>])?: <Content>",
+        "log_format": r"<Label> <Timestamp> <Date> <User> <Month> <Day> <Time> <Location> <Component>[<PID>]: <Content>",
         "regex": [r"(\d+\.){3}\d+"],
         "st": 0.5,
         "depth": 4,
@@ -248,7 +248,7 @@ benchmark_settings_without_escaping_in_log_format: dict[str, DrainParams] = {
     },
     "Mac": {
         "log_file": "Mac/Mac_2k.log",
-        "log_format": r"<Month>  <Date> <Time> <User> <Component>[<PID>]( (<Address>))?: <Content>",
+        "log_format": r"<Month>  <Date> <Time> <User> <Component>[<PID>]( (<Address>)): <Content>",
         "regex": [r"([\w-]+\.){2,}[\w-]+"],
         "st": 0.7,
         "depth": 6,
