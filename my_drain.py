@@ -375,7 +375,7 @@ class LogParser:
         regex = ""
         for k in range(len(splitters)):
             if k % 2 == 0:
-                if not is_log_format_escaped:
+                if  not is_log_format_escaped:
                     splitter = re.escape(splitters[k])
                     splitter = re.sub(r"(:?\\ +)+", r"\\s+", splitter)
                 else:
