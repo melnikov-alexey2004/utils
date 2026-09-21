@@ -1,359 +1,403 @@
+import math
 import os.path
-
-import peft
 import torch
-from transformers import BertTokenizerFast, BertModel, BitsAndBytesConfig, AutoTokenizer, AutoModelForCausalLM, DynamicCache
-import numpy as np
+import torch.nn.functional as F
 from torch import nn
-from peft import PeftModel, LoraConfig, prepare_model_for_kbit_training, get_peft_model, TaskType
-
-def merge_data(data):
-    merged_data = []
-
-    # 用于记录每个子列表开始的位置
-    start_positions = []
-
-    # 当前起始位置
-    current_position = 0
-
-    for sublist in data:
-        start_positions.append(current_position)
-        merged_data.extend(sublist)
-        current_position += len(sublist)
-    return merged_data, start_positions
-
-def stack_and_pad_right(tensors):
-    # 找到第一维度的最大长度
-    max_len = max(tensor.shape[0] for tensor in tensors)
-
-    # 创建一个存放结果的列表
-    padded_tensors = []
-    padding_masks = []
-
-    for tensor in tensors:
-        # 计算需要填充的长度
-        pad_len = max_len - tensor.shape[0]
-
-        # 使用零填充
-        padded_tensor = torch.nn.functional.pad(tensor, (0, 0, 0, pad_len))
-        padded_tensors.append(padded_tensor)
-
-        # 创建填充位置的掩码
-        padding_mask = torch.cat([torch.ones(tensor.shape[0], dtype=torch.long),
-                                  torch.zeros(pad_len, dtype=torch.long)])
-        padding_masks.append(padding_mask)
-
-    # 堆叠所有填充后的张量
-    stacked_tensor = torch.stack(padded_tensors)
-    padding_masks = torch.stack(padding_masks)
-
-    return stacked_tensor, padding_masks
+from transformers import (
+    AutoTokenizer, AutoModel, AutoModelForCausalLM,
+    BitsAndBytesConfig, DynamicCache,
+)
+from peft import PeftModel, LoraConfig, get_peft_model, TaskType
 
 def stack_and_pad_left(tensors):
-    # 找到第一维度的最大长度
-    max_len = max(tensor.shape[0] for tensor in tensors)
+    max_len = max(t.shape[0] for t in tensors)
+    padded, masks = [], []
+    for t in tensors:
+        pad = max_len - t.shape[0]
+        padded.append(F.pad(t, (0, 0, pad, 0)))
+        masks.append(torch.cat([
+            torch.zeros(pad, dtype=torch.long),
+            torch.ones(t.shape[0], dtype=torch.long),
+        ]))
+    return torch.stack(padded), torch.stack(masks)
 
-    # 创建一个存放结果的列表
-    padded_tensors = []
-    padding_masks = []
+class Time2Vec(nn.Module):
+    # t2v(τ)[0] = w0·τ + b0
+    # t2v(τ)[i] = sin(w_i·τ + b_i)
+    # https://arxiv.org/html/1907.05321
 
-    for tensor in tensors:
-        # 计算需要填充的长度
-        pad_len = max_len - tensor.shape[0]
+    def __init__(self, k: int = 16):
+        super().__init__()
+        self.k = k
+        self.w0 = nn.Parameter(torch.randn(1) * 0.01)
+        self.b0 = nn.Parameter(torch.zeros(1))
+        self.w = nn.Parameter(torch.randn(k) * 0.01)
+        self.b = nn.Parameter(torch.zeros(k))
 
-        # 使用零填充
-        padded_tensor = torch.nn.functional.pad(tensor, (0, 0, pad_len, 0))
-        padded_tensors.append(padded_tensor)
+    def forward(self, t): # [N,]
+        lin = (self.w0 * t + self.b0).unsqueeze(-1) # [N, 1]
+        per = torch.sin(t.unsqueeze(-1) * self.w + self.b) # [N, 1] @ [k] + [k]
+        return torch.cat([lin, per], dim=-1) # [N, k+1]
 
-        # 创建填充位置的掩码
-        padding_mask = torch.cat([torch.zeros(pad_len, dtype=torch.long),
-                                 torch.ones(tensor.shape[0], dtype=torch.long)])
-        padding_masks.append(padding_mask)
 
-    # 堆叠所有填充后的张量
-    stacked_tensor = torch.stack(padded_tensors)
-    padding_masks = torch.stack(padding_masks)
+def cyclic_time_features(times):
+    # https://arxiv.org/pdf/2411.15250
+    feats = []
+    for t in times:
+        h, m = t.hour / 24.0, t.minute / 60.0
+        # jan 1- feb 2 - ... - dec 12 - jan 1 (13)
+        #     0      1             11    12
+        dow, mon = t.weekday() / 7.0, (t.month - 1) / 12.0
+        dom = (t.day - 1) / 31.0
+        feats.append([
+            math.sin(2*math.pi*h),   math.cos(2*math.pi*h),
+            math.sin(2*math.pi*m),   math.cos(2*math.pi*m),
+            math.sin(2*math.pi*dow), math.cos(2*math.pi*dow),
+            math.sin(2*math.pi*mon), math.cos(2*math.pi*mon),
+            math.sin(2*math.pi*dom), math.cos(2*math.pi*dom),
+        ])
+    return torch.tensor(feats, dtype=torch.float32)
 
-    return stacked_tensor, padding_masks
 
 bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,  # load the model into memory using 4-bit precision
-    bnb_4bit_use_double_quant=False,  # use double quantition
-    bnb_4bit_quant_type="nf4",  # use NormalFloat quantition
-    bnb_4bit_compute_dtype=torch.bfloat16  # use hf for computing when we need
+    load_in_4bit=True,
+    bnb_4bit_use_double_quant=False,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.bfloat16,
 )
 
-class CascadeModel(nn.Module):
-    def __init__(self, Bert_path, Llama_path, ft_path=None, is_train_mode=True, device = torch.device("cuda:0"),
-                 max_content_len = 128, max_seq_len = 128):
+class Projector(nn.Module):
+    def __init__(self, in_dim, out_dim, device):
         super().__init__()
-        self.max_content_len = max_content_len  # max length of each log messages (contents)
-        self.max_seq_len = max_seq_len   # max length of each log sequence  (log sequence contains some log messages)
+        self.linear = nn.Linear(in_dim, out_dim, device=device)
+        nn.init.normal_(self.linear.weight, std=0.02)
+        nn.init.zeros_(self.linear.bias)
+        self.act = nn.LeakyReLU(negative_slope=0.01)
+        # слишком большая дисперсия была  бы для пространства эмбеддингов
+        self.norm = nn.LayerNorm(out_dim, device=device)
+        # только Linear в bf16
+        # layer norm остаётся в fp32
+        self.linear = self.linear.to(torch.bfloat16)
+
+    def forward(self, x):
+        x = self.linear(x.to(torch.bfloat16))
+        x = self.act(x)
+        x = self.norm(x.float())
+        return x.to(torch.bfloat16)
+
+class LogDetector(nn.Module):
+    def __init__(
+        self,
+        encoder_path,
+        decoder_path,
+        ft_path=None,
+        is_train_mode=True,
+        device=torch.device("cuda:0"),
+        max_content_len=4096, # в один чанк
+        time2vec_k=16,
+        n_layers_agg=4,
+    ):
+        super().__init__()
+        self.max_content_len = max_content_len
+        self.time2vec_k = time2vec_k
+        self.n_layers_agg = n_layers_agg
         self.device = device
-        self.Llama_tokenizer = AutoTokenizer.from_pretrained(Llama_path, padding_side="right")
-        self.Llama_tokenizer.pad_token = self.Llama_tokenizer.eos_token
-        self.Llama_model = AutoModelForCausalLM.from_pretrained(Llama_path, quantization_config=bnb_config,
-                                                           low_cpu_mem_usage=True,
-                                                           device_map=device)  # embedding dim = 4096
 
-        self.Bert_tokenizer = BertTokenizerFast.from_pretrained(Bert_path, do_lower_case=True)
-        self.Bert_model = BertModel.from_pretrained(Bert_path, quantization_config=bnb_config, low_cpu_mem_usage=True,
-                                               device_map=device)
+        self.decoder_tokenizer = AutoTokenizer.from_pretrained(
+            decoder_path, padding_side="right", trust_remote_code=True
+        )
+        if self.decoder_tokenizer.pad_token is None:
+            self.decoder_tokenizer.pad_token = self.decoder_tokenizer.eos_token
+        self.decoder = AutoModelForCausalLM.from_pretrained(
+            decoder_path, quantization_config=bnb_config,
+            low_cpu_mem_usage=True, device_map=device, trust_remote_code=True,
+        )
+        self.decoder_hidden = self.decoder.config.hidden_size
 
-        self.projector = nn.Linear(self.Bert_model.config.hidden_size, self.Llama_model.config.hidden_size, device=device)
-        # self.projector = nn.Linear(self.Bert_model.config.hidden_size, self.Llama_model.config.hidden_size).half().to(device)
+        self.encoder_tokenizer = AutoTokenizer.from_pretrained(
+            encoder_path, trust_remote_code=True
+        )
+        self.encoder = AutoModel.from_pretrained(
+            encoder_path, quantization_config=bnb_config,
+            low_cpu_mem_usage=True, device_map=device, trust_remote_code=True,
+        )
+        self.encoder_hidden = self.encoder.config.hidden_size
+        self.sep_id = self.encoder_tokenizer.sep_token_id
+        self.cls_id = self.encoder_tokenizer.cls_token_id
 
-        self.instruc_tokens = self.Llama_tokenizer(
-            ['Below is a sequence of system log messages:', '. Is this sequence normal or anomalous? \\n'],
-            return_tensors="pt", padding=True).to(self.device)
+        self.time2vec = Time2Vec(time2vec_k).to(device)
+        self.time_feat_dim = (time2vec_k + 1) + 10
 
-        # if is_train_mode:
-        #     self.Bert_model = prepare_model_for_kbit_training(self.Bert_model)
-        #     self.Llama_model = prepare_model_for_kbit_training(self.Llama_model)
+        self.projector = Projector(self.encoder_hidden + self.time_feat_dim,
+                                   self.decoder_hidden,
+                                   device)
+
+        self.instruc_tokens = self.decoder_tokenizer(
+            ["Below is a sequence of system log messages:",
+             ". Is this sequence normal or anomalous? \n"],
+            return_tensors="pt", padding=True,
+        ).to(device)
 
         if ft_path is not None:
-            print(f'Loading peft model from {ft_path}.')
-            Llama_ft_path = os.path.join(ft_path, 'Llama_ft')
-            Bert_ft_path = os.path.join(ft_path, 'Bert_ft')
-            projector_path = os.path.join(ft_path, 'projector.pt')
-            self.Llama_model = PeftModel.from_pretrained(
-                self.Llama_model,
-                Llama_ft_path,
-                is_trainable=is_train_mode,
-                torch_dtype=torch.float16,
-            )
-            self.Bert_model = PeftModel.from_pretrained(
-                self.Bert_model,
-                Bert_ft_path,
-                is_trainable=is_train_mode,
-                torch_dtype=torch.float16,
-            )
-            self.projector.load_state_dict(torch.load(projector_path, map_location=device, weights_only=True))
+            self._load_ft(ft_path, is_train_mode)
         else:
-            print(f'Creating peft model.')
-            Bert_peft_config = LoraConfig(task_type=TaskType.FEATURE_EXTRACTION,
-                                          r=4,
-                                          lora_alpha=32,
-                                          lora_dropout=0.01)
-            self.Bert_model = get_peft_model(self.Bert_model, Bert_peft_config)
+            self._init_peft()
 
-            Llama_peft_config = LoraConfig(
-                r=8,
-                lora_alpha=16,
-                lora_dropout=0.1,
-                target_modules=["q_proj", "v_proj"],
-                bias="none",
-                task_type=TaskType.CAUSAL_LM
-            )
-            self.Llama_model = get_peft_model(self.Llama_model, Llama_peft_config)
+    def _init_peft(self):
+        # peft оборачивает модель. которая доступна по аттр .model
+        self.encoder = get_peft_model(self.encoder, LoraConfig(
+            task_type=TaskType.FEATURE_EXTRACTION,
+            r=4, lora_alpha=32, lora_dropout=0.01,
+            target_modules=["query", "value"],
+        ))
+        self.decoder = get_peft_model(self.decoder, LoraConfig(
+            r=8, lora_alpha=16, lora_dropout=0.1,
+            target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+            bias="none", task_type=TaskType.CAUSAL_LM,
+        ))
+
+    def _load_ft(self, ft_path, is_trainable):
+        self.encoder = PeftModel.from_pretrained(
+            self.encoder, os.path.join(ft_path, "encoder_ft"), is_trainable=is_trainable)
+        self.decoder = PeftModel.from_pretrained(
+            self.decoder, os.path.join(ft_path, "decoder_ft"), is_trainable=is_trainable)
+        self.projector.load_state_dict(torch.load(
+            os.path.join(ft_path, "projector.pt"), map_location=self.device, weights_only=True))
+        self.time2vec.load_state_dict(torch.load(
+            os.path.join(ft_path, "time2vec.pt"), map_location=self.device, weights_only=True))
 
     def save_ft_model(self, path):
-        if not os.path.exists(path):
-            os.makedirs(path)
-        Llama_ft_path = os.path.join(path,'Llama_ft')
-        Bert_ft_path = os.path.join(path,'Bert_ft')
-        projector_path = os.path.join(path,'projector.pt')
-        self.Llama_model.save_pretrained(Llama_ft_path, safe_serialization = True)
-        self.Bert_model.save_pretrained(Bert_ft_path, safe_serialization =True)
-        torch.save(self.projector.state_dict(), projector_path)
-
+        os.makedirs(path, exist_ok=True)
+        self.encoder.save_pretrained(os.path.join(path, "encoder_ft"))
+        self.decoder.save_pretrained(os.path.join(path, "decoder_ft"))
+        torch.save(self.projector.state_dict(), os.path.join(path, "projector.pt"))
+        torch.save(self.time2vec.state_dict(), os.path.join(path, "time2vec.pt"))
 
     def set_train_only_projector(self):
-        for name, param in self.projector.named_parameters():
-            param.requires_grad = True
-        for name, param in self.Bert_model.named_parameters():
-            param.requires_grad = False
-        for name, param in self.Llama_model.named_parameters():
-            param.requires_grad = False
+        for p in self.projector.parameters(): p.requires_grad = True
+        for p in self.time2vec.parameters(): p.requires_grad = True
+        for p in self.encoder.parameters():  p.requires_grad = False
+        for p in self.decoder.parameters():  p.requires_grad = False
 
-    def set_train_only_Llama(self):
-        for name, param in self.projector.named_parameters():
-            param.requires_grad = False
-        for name, param in self.Bert_model.named_parameters():
-            param.requires_grad = False
-        for name, param in self.Llama_model.named_parameters():
-            if 'lora' in name:
-                param.requires_grad = True
-
-    def set_train_projectorAndBert(self):
-        for name, param in self.projector.named_parameters():
-            param.requires_grad = True
-        for name, param in self.Bert_model.named_parameters():
-            if 'lora' in name:
-                param.requires_grad = True
-        for name, param in self.Llama_model.named_parameters():
-            param.requires_grad = False
-
+    def set_train_projector_and_encoder(self):
+        for p in self.projector.parameters(): p.requires_grad = True
+        for p in self.time2vec.parameters(): p.requires_grad = True
+        for n, p in self.encoder.named_parameters():
+            p.requires_grad = "lora" in n
+        for p in self.decoder.parameters(): p.requires_grad = False
 
     def set_finetuning_all(self):
-        for name, param in self.projector.named_parameters():
-            param.requires_grad = True
-        for name, param in self.Bert_model.named_parameters():
-            if 'lora' in name:
-                param.requires_grad = True
-        for name, param in self.Llama_model.named_parameters():
-            if 'lora' in name:
-                param.requires_grad = True
+        for p in self.projector.parameters(): p.requires_grad = True
+        for p in self.time2vec.parameters(): p.requires_grad = True
+        for n, p in self.encoder.named_parameters():
+            p.requires_grad = "lora" in n
+        for n, p in self.decoder.named_parameters():
+            p.requires_grad = "lora" in n
 
+    def _build_chunks(self, batch_log_ids):
+        # batch_log_ids: List[List[List[int]]]
+        # [окно][лог][token_id]
 
-    def train_helper(self, inputs, seq_positions, labels):
-        '''
-        :param inputs: the tokenized Sequences for BERT. Sequences are concatenated.
-        :param: seq_positions:
-        :param labels: np.array of labels, label is one of ['anomalous', 'normal']
-        :return: Llama_output[label_mask], target_tokens_ids[target_tokens_atts]
-        '''
-        batch_size = len(labels)
+        # all_chunks: List[(ids, offsets)]
+        # где offsets = [(log_idx, start, end)]
+        # window_ranges: List[(chunk_start, chunk_end)]
+        # window_log_counts: List[int]
+        all_chunks, window_ranges, window_log_counts = [], [], []
+        sep, cls, L = self.sep_id, self.cls_id, self.max_content_len
 
+        for window in batch_log_ids:
+            c_start = len(all_chunks)
+            cur_ids, cur_offsets, cur_len = [cls], [], 1
 
-        outputs = self.Bert_model(**inputs).pooler_output  # dim = 768
-        outputs = outputs.float()
-        outputs = self.projector(outputs)
-        outputs = outputs.half()
+            for log_idx, ids in enumerate(window):
+                max_log = L - 2
+                if len(ids) > max_log:
+                    ids = ids[:max_log]
+                if not ids:
+                    continue
 
-        seq_embeddings = torch.tensor_split(outputs, seq_positions)
+                needed = len(ids) + 1
+                if cur_len + needed > L:
+                    if cur_offsets:
+                        all_chunks.append((cur_ids, cur_offsets))
+                    cur_ids, cur_offsets, cur_len = [cls], [], 1
+
+                start = cur_len
+                cur_ids.extend(ids)
+                cur_len += len(ids)
+                end = cur_len
+                cur_offsets.append((log_idx, start, end))
+                cur_ids.append(sep)
+                cur_len += 1
+
+            if cur_offsets:
+                all_chunks.append((cur_ids, cur_offsets))
+
+            window_ranges.append((c_start, len(all_chunks)))
+            window_log_counts.append(len(window))
+
+        return all_chunks, window_ranges, window_log_counts
+
+    def _encode_and_pool(self, all_chunks, window_ranges, window_log_counts):
+        max_chunk = max(len(c[0]) for c in all_chunks)
+        input_ids  = torch.zeros(len(all_chunks), max_chunk, dtype=torch.long)
+        attn_mask  = torch.zeros_like(input_ids)
+        global_msk = torch.zeros_like(input_ids)
+
+        for i, (ids, _) in enumerate(all_chunks):
+            n = len(ids)
+            input_ids[i, :n] = torch.tensor(ids, dtype=torch.long)
+            attn_mask[i, :n] = 1
+            global_msk[i, 0] = 1
+
+        input_ids  = input_ids.to(self.device)
+        attn_mask  = attn_mask.to(self.device)
+        global_msk = global_msk.to(self.device)
+
+        out = self.encoder(
+            input_ids=input_ids,
+            attention_mask=attn_mask,
+            global_attention_mask=global_msk,
+            output_hidden_states=True,
+        )
+        hidden = torch.stack(out.hidden_states[-self.n_layers_agg:], dim=0).mean(0)
+
+        log_embs = []
+        for w_idx, (c_start, c_end) in enumerate(window_ranges):
+            per_log = [None] * window_log_counts[w_idx]
+            for c in range(c_start, c_end):
+                _, offsets = all_chunks[c]
+                for log_idx, s, e in offsets:
+                    per_log[log_idx] = hidden[c, s:e].mean(dim=0)
+            # падинг для логов которые
+            for j, e in enumerate(per_log):
+                if e is None:
+                    per_log[j] = torch.zeros(self.encoder_hidden, device=self.device)
+            log_embs.extend(per_log)
+
+        return torch.stack(log_embs, dim=0) # [total_logs, H_enc]
+
+    def _time_features(self, times_flat, window_log_counts):
+        cyclic = cyclic_time_features(times_flat).to(self.device)
+
+        t2v_list, pos = [], 0
+        for n in window_log_counts:
+            if n == 0:
+                continue
+            t0 = times_flat[pos]
+            deltas = torch.tensor(
+                [(times_flat[pos + i] - t0).total_seconds() / 3600.0 for i in range(n)],
+                device=self.device, dtype=torch.float32,
+            )
+            t2v_list.append(self.time2vec(deltas))
+            pos += n
+
+        t2v = torch.cat(t2v_list, dim=0)
+        return torch.cat([t2v, cyclic], dim=-1).to(torch.bfloat16)
+
+    def _decoder_embed(self, ids):
+        base = self.decoder
+        if isinstance(base, PeftModel):
+            base = base.base_model.model
+        if hasattr(base, "model") and hasattr(base.model, "embed_tokens"):
+            return base.model.embed_tokens(ids)
+        return base.get_input_embeddings()(ids)
+
+    def _ins_emb(self):
+        if not hasattr(self, "_ins_cache"):
+            emb = self._decoder_embed(self.instruc_tokens["input_ids"])
+            mask = self.instruc_tokens["attention_mask"].bool()
+            prefix_ids = self.decoder_tokenizer(
+                "The sequence is", return_tensors="pt")["input_ids"][0, 1:].to(self.device)
+            self._ins_cache = {
+                "ins1": emb[0][mask[0]],
+                "ins2": emb[1][mask[1]][1:],
+                "prefix": self._decoder_embed(prefix_ids),
+            }
+        return self._ins_cache
+
+    def _log_embeddings(self, batch_log_ids, times_flat):
+        all_chunks, wranges, wcounts = self._build_chunks(batch_log_ids)
+        enc_embs = self._encode_and_pool(all_chunks, wranges, wcounts)
+        time_embs = self._time_features(times_flat, wcounts)
+        combined = torch.cat([enc_embs.to(torch.bfloat16), time_embs], dim=-1)
+        return self.projector(combined), wcounts
+
+    def train_helper(self, batch_log_ids, times_flat, labels):
+        B = len(labels)
+        log_proj, wcounts = self._log_embeddings(batch_log_ids, times_flat)
 
         prefix = "The sequence is "
-        max_len = max(len(s) for s in labels) + len(prefix)
-        labels = np.char.add(np.char.add(prefix, labels.astype(f'U{max_len}')), ".")
-        answer_tokens = self.Llama_tokenizer(list(labels), padding=True, return_tensors="pt").to(self.device)
+        answer_tokens = self.decoder_tokenizer(
+            [prefix + s + "." for s in labels], padding=True, return_tensors="pt"
+        ).to(self.device)
 
-        target_tokens_ids = torch.cat([answer_tokens['input_ids'][:, 1:],
-                                       torch.full((batch_size, 1), self.Llama_tokenizer.eos_token_id, device=self.device)],
-                                      dim=-1)  # add eos token
-        target_tokens_atts = answer_tokens['attention_mask'].bool()
+        target_ids = torch.cat([
+            answer_tokens["input_ids"][:, 1:],
+            torch.full((B, 1), self.decoder_tokenizer.eos_token_id, device=self.device),
+        ], dim=-1)
+        target_atts = answer_tokens["attention_mask"].bool()
 
-        answer_tokens_ids = answer_tokens['input_ids'][:, 1:]  # remove bos token
-        answer_tokens_atts = answer_tokens['attention_mask'].bool()[:, 1:]
+        ans_ids = answer_tokens["input_ids"][:, 1:]
+        ans_atts = answer_tokens["attention_mask"].bool()[:, 1:]
+        ans_embs = self._decoder_embed(ans_ids)
 
-        if type(self.Llama_model) == peft.peft_model.PeftModelForCausalLM:
-            instruc_embeddings = self.Llama_model.model.model.embed_tokens(self.instruc_tokens['input_ids'])
-            answer_embeddings = self.Llama_model.model.model.embed_tokens(answer_tokens_ids)
-        else:
-            instruc_embeddings = self.Llama_model.model.embed_tokens(self.instruc_tokens['input_ids'])
-            answer_embeddings = self.Llama_model.model.embed_tokens(answer_tokens_ids)
+        ins = self._ins_emb()
+        prompts, target_lens, pos = [], [], 0
+        for b, n in enumerate(wcounts):
+            logs_cat = log_proj[pos:pos + n]; pos += n
+            ans_cat = ans_embs[b][ans_atts[b]]
+            full = torch.cat([ins["ins1"], logs_cat, ins["ins2"], ans_cat], dim=0)
+            prompts.append(full)
+            target_lens.append(ans_cat.shape[0])
 
-        ins1 = instruc_embeddings[0][self.instruc_tokens['attention_mask'][0].bool()]
-        ins2 = instruc_embeddings[1][self.instruc_tokens['attention_mask'][1].bool()][1:]
-
-        embeddings = []
-        target_lens = []
-        for seq_embedding, answer_embedding, answer_tokens_att in zip(seq_embeddings, answer_embeddings,
-                                                                      answer_tokens_atts):
-            full_prompt_embedding = torch.cat([ins1, seq_embedding, ins2, answer_embedding[answer_tokens_att]])
-            target_lens.append(answer_tokens_att.sum())
-            embeddings.append(full_prompt_embedding)
-
-        inputs_embeds, attention_mask = stack_and_pad_left(embeddings)
-        attention_mask = attention_mask.to(self.device)
-        label_mask = attention_mask.clone()
+        inputs_embeds, attn = stack_and_pad_left(prompts)
+        attn = attn.to(self.device)
+        label_mask = attn.clone()
         for i in range(label_mask.shape[0]):
-            label_mask[i, :-target_lens[i]-1] = 0
+            label_mask[i, : -target_lens[i] - 1] = 0
         label_mask = label_mask.bool()
 
-        Llama_output = self.Llama_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask).logits
+        out = self.decoder(inputs_embeds=inputs_embeds, attention_mask=attn).logits
+        return out[label_mask], target_ids[target_atts]
 
-        return Llama_output[label_mask], target_tokens_ids[target_tokens_atts]
+    @torch.no_grad()
+    def forward(self, batch_log_ids, times_flat):
+        log_proj, wcounts = self._log_embeddings(batch_log_ids, times_flat)
+        ins = self._ins_emb()
 
-    def forward(self, inputs, seq_positions):
-        '''
-        :param inputs: the tokenized Sequences for BERT. Sequences are concatenated.
-        :param seq_positions:
-        :return: Generated answer (token id).
-        '''
-        batch_size = len(seq_positions) + 1
+        prompts, pos = [], 0
+        for n in wcounts:
+            logs_cat = log_proj[pos:pos + n]; pos += n
+            prompts.append(torch.cat([ins["ins1"], logs_cat, ins["ins2"], ins["prefix"]], dim=0))
 
-        outputs = self.Bert_model(**inputs).pooler_output  # dim = 768
-        outputs = outputs.float()
-        outputs = self.projector(outputs)
-        outputs = outputs.half()
+        inputs_embeds, attn = stack_and_pad_left(prompts)
+        attn = attn.to(self.device)
 
-        seq_embeddings = torch.tensor_split(outputs, seq_positions)
+        B = len(wcounts)
+        pad_id = self.decoder_tokenizer.pad_token_id
+        eos_id = self.decoder_tokenizer.eos_token_id
+        eos_t = torch.tensor([eos_id], device=self.device)
 
-        prefix = "The sequence is"
-        answer_prefix_tokens = self.Llama_tokenizer(prefix, padding=True, return_tensors="pt")['input_ids'][0,1:].to(
-            self.device)
-
-        if type(self.Llama_model) == peft.peft_model.PeftModelForCausalLM:
-            instruc_embeddings = self.Llama_model.model.model.embed_tokens(self.instruc_tokens['input_ids'])
-            answer_prefix_tokens_embeddings = self.Llama_model.model.model.embed_tokens(answer_prefix_tokens)
-        else:
-            instruc_embeddings = self.Llama_model.model.embed_tokens(self.instruc_tokens['input_ids'])
-            answer_prefix_tokens_embeddings = self.Llama_model.model.embed_tokens(answer_prefix_tokens)
-
-        ins1 = instruc_embeddings[0][self.instruc_tokens['attention_mask'][0].bool()]
-        ins2 = instruc_embeddings[1][self.instruc_tokens['attention_mask'][1].bool()][1:]
-
-
-
-        promot_embeddings = []
-        for seq_embedding in seq_embeddings:
-            prompt_embedding = torch.cat([ins1, seq_embedding, ins2, answer_prefix_tokens_embeddings])
-            promot_embeddings.append(prompt_embedding)
-
-        inputs_embeds, attention_mask = stack_and_pad_left(promot_embeddings)
-        attention_mask = attention_mask.to(self.device)
-
-        pad_token_id = self.Llama_tokenizer.pad_token_id
-        eos_token_id = self.Llama_tokenizer.eos_token_id
-        if isinstance(eos_token_id, int):
-            eos_token_id = [eos_token_id]
-        eos_token_id_tensor = torch.tensor(eos_token_id).to(self.device) if eos_token_id is not None else None
-
-        unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=self.device)
-
-        this_peer_finished = False
+        unfinished = torch.ones(B, dtype=torch.long, device=self.device)
+        cache = DynamicCache()
         answer = []
-        past_key_values = DynamicCache()  # 新缓存对象
 
-
-        while not this_peer_finished:
-            if len(past_key_values) == 0:
-                # 初始轮：传完整 inputs_embeds
-                outputs = self.Llama_model(
-                    inputs_embeds=inputs_embeds,
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
+        while True:
+            if len(cache) == 0:
+                out = self.decoder(inputs_embeds=inputs_embeds, attention_mask=attn,
+                                   past_key_values=cache, use_cache=True)
             else:
-                # 后续轮：只传一个 token 的 embedding（即上一步预测的 token）
-                outputs = self.Llama_model(
-                    inputs_embeds=next_tokens_embeddings[:, None, :],
-                    attention_mask=attention_mask,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
+                out = self.decoder(inputs_embeds=next_emb[:, None, :], attention_mask=attn,
+                                   past_key_values=cache, use_cache=True)
+            nxt = torch.argmax(out.logits[:, -1, :], dim=-1)
+            nxt = nxt * unfinished + pad_id * (1 - unfinished)
+            answer.append(nxt)
+            next_emb = self._decoder_embed(nxt)
+            attn = torch.cat([attn, unfinished[:, None]], dim=1)
+            unfinished = unfinished.mul(
+                nxt.tile(eos_t.shape[0], 1).ne(eos_t.unsqueeze(1)).prod(dim=0))
+            if unfinished.max() == 0 or len(answer) > 5:
+                break
 
-            logits = outputs.logits
-            next_token_logits = logits[:, -1, :]
-            next_tokens = torch.argmax(next_token_logits, dim=-1)
-
-            # 应对结束符逻辑
-            next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
-            answer.append(next_tokens)
-
-            # obtain embedding of next token
-            if isinstance(self.Llama_model, peft.peft_model.PeftModelForCausalLM):
-                next_tokens_embeddings = self.Llama_model.model.model.embed_tokens(next_tokens)
-            else:
-                next_tokens_embeddings = self.Llama_model.model.embed_tokens(next_tokens)
-
-            # update attention_mask
-            attention_mask = torch.cat([attention_mask, unfinished_sequences[:, None]], dim=1)
-
-            if eos_token_id_tensor is not None:
-                unfinished_sequences = unfinished_sequences.mul(
-                    next_tokens.tile(eos_token_id_tensor.shape[0], 1)
-                    .ne(eos_token_id_tensor.unsqueeze(1))
-                    .prod(dim=0)
-                )
-
-                if unfinished_sequences.max() == 0:
-                    this_peer_finished = True
-
-            # stop if we exceed the maximum answer length
-            if  5 < len(answer):
-                this_peer_finished = True
-
-        return torch.stack(answer,dim=1)
+        return torch.stack(answer, dim=1)
