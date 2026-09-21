@@ -9,3 +9,8 @@ __pycache__/
 /nb/
 /Drain3/
 /req.txt # colab req
+/archive_extracted
+*.parquet
+#/my_datasets/analys/
+/model # временно.
+/deleted

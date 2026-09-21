@@ -101,6 +101,7 @@ class TemplateMiner:
         state = self.persistence_handler.load_state()
         if state is None:
             logger.info("Saved state not found")
+            warnings.warn("Saved state not found")
             return
 
         if self.config.snapshot_compress_state:
@@ -123,6 +124,8 @@ class TemplateMiner:
         self.drain.root_node = loaded_drain.root_node
 
         logger.info(f"Restored {len(loaded_drain.clusters)} clusters "
+                    f"built from {loaded_drain.get_total_cluster_size()} messages")
+        warnings.warn(f"Restored {len(loaded_drain.clusters)} clusters "
                     f"built from {loaded_drain.get_total_cluster_size()} messages")
 
     def save_state(self, snapshot_reason: str) -> None:
