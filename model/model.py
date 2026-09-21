@@ -1,6 +1,5 @@
-import transformers
-import peft
-import os
+import os.path
+
 import peft
 import torch
 from transformers import BertTokenizerFast, BertModel, BitsAndBytesConfig, AutoTokenizer, AutoModelForCausalLM, DynamicCache
@@ -84,7 +83,7 @@ bnb_config = BitsAndBytesConfig(
     bnb_4bit_compute_dtype=torch.bfloat16  # use hf for computing when we need
 )
 
-class LogLLM(nn.Module):
+class CascadeModel(nn.Module):
     def __init__(self, Bert_path, Llama_path, ft_path=None, is_train_mode=True, device = torch.device("cuda:0"),
                  max_content_len = 128, max_seq_len = 128):
         super().__init__()

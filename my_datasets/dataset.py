@@ -5,13 +5,15 @@ import shutil
 import warnings
 import gzip
 import typing
+import datetime
 
 
 class Data:
     path_to_log_dir: str
     path_to_log: str
+    cnt_ind: int
 
-    def __init__(self, downloaded_url: str, train_ratio: float, cache_dir: str = os.path.expanduser('~/.dataset'),
+    def __init__(self, downloaded_url: str, cache_dir: str = os.path.expanduser('~/.dataset'),
                  dataset_dir:str='hdfs', extract_dir:str='../archive_extracted',
                  repeat_download: bool = False,
                  custom_archive_path: typing.Optional[str] = None, remove_archive: bool = False,
@@ -20,12 +22,14 @@ class Data:
         # gzip_fp -> extract_dir/data_dir/data_dir.log
         # * -> extract_dir/data_dir/*
 
-        assert 0 <= train_ratio <= 1.
+        colab_content = "/content/"
         if use_in_colab:
-            cache_dir = "/content/"
-            extract_dir = cache_dir
+            cache_dir = colab_content
+            extract_dir = colab_content
 
-        self.train_ratio = train_ratio
+        if os.path.exists(colab_content) and not use_in_colab:
+            warnings.warn("use_in_colab = False но при этом существует /content/")
+
         self.cache_dir=cache_dir
         self.dataset_dir=dataset_dir
         self.extract_dir=extract_dir
@@ -129,16 +133,47 @@ class Data:
                 os.remove(archive_path)
                 print('archive removed', )
 
+    def get_time_content_label(self, raw_log: str) -> tuple[typing.Optional[datetime.datetime],
+                                                str, int]:
+        s = raw_log.split()
+        label = 1
+        try:
+            if s[0] == "-": label = 0
+            ts = int(s[1])
+            dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+            cnt = ""
+            if len(s) > self.cnt_ind:
+                cnt = " ".join(s[self.cnt_ind:])
+        except Exception:
+            return None, "", 0
 
+        return dt, cnt, label
 
-import datetime
 import numpy  as np
 import typing
 import math
+import regex as re
+
+patterns = [r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d{1,5})?', #  IP:PORT
+    r'([0-9A-Fa-f]{2}:){11}[0-9A-Fa-f]{2}',   # Special MAC
+    r'([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}',   # MAC
+    r'[a-zA-Z0-9]*[:\.]*([/\\]+[^/\\\s\[\]]+)+[/\\]*',  # file path
+    r'\b[0-9a-fA-F]{8}\b',
+    r'\b[0-9a-fA-F]{10}\b',
+    r'(\w+[\w\.]*)@(\w+[\w\.]*)\-(\w+[\w\.]*)',
+    r'(\w+[\w\.]*)@(\w+[\w\.]*)',
+    r'[a-zA-Z\.\:\-\_]*\d[a-zA-Z0-9\.\:\-\_]*',  # word
+]
+combined_pattern = '|'.join(patterns)
+def replace_patterns(text):
+    text = re.sub(r'\.{3,}', '..', text)
+    text = re.sub(combined_pattern, '<*>', text)
+    return text
+
 class SuperComputerDataset(Dataset):
     def __init__(
             self,
-            filepath: str,
+            source: Data,
             n: int,
             max_lines: typing.Optional[int] = None,
             window_size: int = 200,
@@ -152,7 +187,11 @@ class SuperComputerDataset(Dataset):
 
         self.max_lines = max_lines if max_lines is not None else math.inf
 
-        self.filepath = filepath
+        self.source = source
+        if isinstance(source, Data):
+            self.filepath = source.path_to_log
+        else: raise ValueError
+
         self.n = n
         self.window_size = window_size
         self.step_size = step_size
@@ -164,10 +203,6 @@ class SuperComputerDataset(Dataset):
         self._num_samples = 0
 
         self._build_index()
-
-    def _line_label(self, line: str) -> int:
-        return int(line.lstrip().startswith('-'))
-
 
     def _build_index(self) -> None:
         line_idx = 0
@@ -183,7 +218,7 @@ class SuperComputerDataset(Dataset):
                     self.line_positions.append(pos)
 
                 line = raw.decode("latin-1", errors="replace")
-                self.labels.append(self._line_label(line))
+                self.labels.append(self.source.get_time_content_label(line)[2])
 
                 line_idx += 1
 
@@ -198,7 +233,7 @@ class SuperComputerDataset(Dataset):
 
         self._num_samples = int(total_samples * self.train_ratio)
 
-    def __getitem__(self, start_line: typing.Union[int, np.ndarray]) -> tuple[list, list]:
+    def __getitem__(self, start_line: typing.Union[int, np.ndarray]) -> tuple[list, list, list, int]:
         if isinstance(start_line, np.ndarray):
             # 0d or scalar array
             start_line = start_line.item()
@@ -214,16 +249,22 @@ class SuperComputerDataset(Dataset):
             f.seek(self.line_positions[anchor_idx])
             for _ in range(skip_lines):
                 if not f.readline():
-                    return [], []
+                    return [], [], [], 0
             window = []
+            window_times = []
+            window_raws = []
             for _ in range(self.window_size):
                 raw = f.readline()
                 if not raw:
                     break
-                window.append(raw.decode("latin-1", errors="replace"))
+                raw_log = raw.decode("latin-1", errors="replace")
+                dt, cnt, label = self.source.get_time_content_label(raw_log)
+                window_times.append(dt)
+                window.append(cnt)
+                window_raws.append(raw_log)
 
-        labels = max(self.labels[start_line : start_line + len(window)])
-        return window, labels
+        window_label = max(self.labels[start_line : start_line + len(window)])
+        return window, window_times, window_raws, window_label
 
     def __len__(self):
         return max(0, self.total_lines - self.window_size + 1)
