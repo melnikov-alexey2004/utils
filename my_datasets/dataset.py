@@ -9,8 +9,7 @@ import typing
 
 class Data:
     path_to_log_dir: str
-    path_to_log: list[str]
-    path_to_labels: list[str]
+    path_to_log: str
 
     def __init__(self, downloaded_url: str, train_ratio: float, cache_dir: str = os.path.expanduser('~/.dataset'),
                  dataset_dir:str='hdfs', extract_dir:str='../archive_extracted',
@@ -66,9 +65,11 @@ class Data:
 
             print('archive', filepath, 'will extract')
             archive_path = filepath
-            # поддерживаются. в логхабе не встречал  “bztar”, “xztar”, or “zstdtar”
+            # поддерживаются те что втсречались в логхабе. не встречал  “bztar”, “xztar”, or “zstdtar”
             # поэтому их  поддержки нету
+            # unpack_archive поддерживает след
             # “zip”, “tar”, “gztar”, “bztar”, “xztar”, or “zstdtar”
+            # +gzip
 
             get_mime_type = lambda fp, p: subprocess.run(['file', f'-{p}', fp], capture_output=True, text=True).stdout.split()[
                 1].removesuffix(';').split('/')
@@ -149,7 +150,7 @@ class SuperComputerDataset(Dataset):
         assert step_size >= 1
         assert 0.0 < train_ratio <= 1.0
 
-        self.max_lines = max_lines
+        self.max_lines = max_lines if max_lines is not None else math.inf
 
         self.filepath = filepath
         self.n = n
