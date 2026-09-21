@@ -273,9 +273,8 @@ import numpy as np
 class JitterBalancedSampler(Sampler):
     def __init__(
         self,
-        dataset,
+        dataset: SuperComputerDataset,
         target_ratio=0.3,
-        step_size=200,
         max_samples=None,
         min_samples=50_000,
         seed=None,
@@ -283,13 +282,13 @@ class JitterBalancedSampler(Sampler):
         self.dataset = dataset
         self.W = dataset.window_size
         self.N = dataset.total_lines
-        self.step_size = step_size
+        self.step_size = dataset.step_size
         self.target_ratio = target_ratio
 
         labels = np.asarray(dataset.labels)
         self.anomaly_lines = np.flatnonzero(labels == 1)
 
-        all_starts = np.arange(0, self.N - self.W + 1, step_size, dtype=np.int64)
+        all_starts = np.arange(0, self.N - self.W + 1, self.step_size, dtype=np.int64)
         prefix = np.zeros(self.N + 1, dtype=np.int64)
         prefix[1:] = np.cumsum(labels)
         has_anom = (prefix[all_starts + self.W] - prefix[all_starts]) > 0
@@ -348,7 +347,7 @@ class JitterBalancedSampler(Sampler):
 
         # с возращением если требуется больше чем есть иначе перестановка
         sampled = self.rng.choice(self.anomaly_lines, self.minority_count,
-                                  replace=self.anomaly_lines==self.minority_count)
+                                  replace=len(self.anomaly_lines) < self.minority_count)
 
         # для каждой — валидный диапазон стартов
         # аномалия стоит на строке с индедксом a
